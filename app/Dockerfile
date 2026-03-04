@@ -12,6 +12,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Pre-download embedding model at build time
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
 
+# Force use of locally cached model and skip HuggingFace network calls at runtime
+ENV TRANSFORMERS_OFFLINE=1
+ENV HF_DATASETS_OFFLINE=1
+
 COPY . .
 
 ENV PYTHONPATH=/app
