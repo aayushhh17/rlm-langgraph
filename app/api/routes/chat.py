@@ -37,9 +37,9 @@ async def chat(request: ChatRequest):
 def _vector_fallback(request: ChatRequest) -> dict:
     """Simple vector search fallback when use_rlm=False."""
     from langchain_openai import ChatOpenAI
-    from langchain.prompts import ChatPromptTemplate
+    # LangChain 1.x: prompts moved to langchain_core
+    from langchain_core.prompts import ChatPromptTemplate
     from langchain_core.output_parsers import StrOutputParser
-    from langchain_core.messages import HumanMessage
 
     settings = get_settings()
     session_id = request.session_id or create_session_id()
