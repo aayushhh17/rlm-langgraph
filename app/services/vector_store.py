@@ -23,7 +23,7 @@ def ensure_collection(collection_name: str = None):
     client = get_qdrant_client()
     if collection_name is None:
         collection_name = settings.qdrant_collection
-    
+
     existing = [c.name for c in client.get_collections().collections]
     if collection_name not in existing:
         client.create_collection(
@@ -34,20 +34,17 @@ def ensure_collection(collection_name: str = None):
 
 
 def list_collections() -> list[str]:
-    """List all available collections."""
     client = get_qdrant_client()
     return [c.name for c in client.get_collections().collections]
 
 
 def delete_collection(collection_name: str):
-    """Delete a collection."""
     client = get_qdrant_client()
     client.delete_collection(collection_name=collection_name)
     logger.info(f"Deleted collection: {collection_name}")
 
 
 def get_collection_stats(collection_name: str) -> dict:
-    """Get collection statistics."""
     client = get_qdrant_client()
     info = client.get_collection(collection_name=collection_name)
     return {
@@ -70,7 +67,6 @@ def upsert_chunks(
     if collection_name is None:
         collection_name = settings.qdrant_collection
 
-    # Fetch existing hashes for this doc to skip duplicates
     existing_hashes = set()
     try:
         results, _ = client.scroll(
@@ -113,18 +109,32 @@ def upsert_chunks(
 
 
 def search(query_vector: list[float], top_k: int, collection_name: str = None) -> list[dict]:
+    """
+    Search for similar vectors in Qdrant.
+    qdrant-client v1.7+ renamed .search() to .query_points().
+    We use query_points() which works on all modern versions.
+    """
     settings = get_settings()
     client = get_qdrant_client()
     if collection_name is None:
         collection_name = settings.qdrant_collection
-    
-    results = client.search(
+
+    from qdrant_client.models import NamedVector
+    from qdrant_client.http.models import QueryRequest
+
+    # query_points is the modern API (replaces .search())
+    results = client.query_points(
         collection_name=collection_name,
-        query_vector=query_vector,
+        query=query_vector,
         limit=top_k,
         with_payload=True,
     )
+
     return [
-        {"text": r.payload["text"], "score": r.score, "filename": r.payload.get("filename")}
-        for r in results
+        {
+            "text": r.payload["text"],
+            "score": r.score,
+            "filename": r.payload.get("filename"),
+        }
+        for r in results.points
     ]
