@@ -13,15 +13,15 @@ A production-grade **Recursive Language Model (RLM)** system rebuilt on **LangGr
 
 ## What's New vs rlm-agent
 
-| Feature          | rlm-agent                        | rlm-langgraph                                |
-| ---------------- | -------------------------------- | -------------------------------------------- |
-| Orchestration    | `AgentExecutor` (black box)      | `StateGraph` (explicit nodes + edges)        |
-| Memory           | `ConversationBufferWindowMemory` | LangGraph `MemorySaver` checkpointer         |
-| State visibility | Hidden inside executor           | Full `AgentState` TypedDict, inspectable     |
-| Loop control     | `max_iterations` config          | `should_continue` edge you own               |
-| Crash recovery   | Work is lost                     | Resumes from last checkpoint                 |
-| Streaming        | Custom event parsing             | Native `graph.stream()` with per-node deltas |
-| Debug endpoint   | None                             | `GET /graph/structure`                       |
+| Feature          | rlm-agent                        | rlm-langgraph                            |
+| ---------------- | -------------------------------- | ---------------------------------------- |
+| Orchestration    | `AgentExecutor` (black box)      | `StateGraph` (explicit nodes + edges)    |
+| Memory           | `ConversationBufferWindowMemory` | LangGraph `MemorySaver` checkpointer     |
+| State visibility | Hidden inside executor           | Full `AgentState` TypedDict, inspectable |
+| Loop control     | `max_iterations` config          | `should_continue` edge you own           |
+| Crash recovery   | Work is lost                     | Resumes from last checkpoint             |
+| Streaming        | Custom event parsing             | Native `graph.stream()` per-node deltas  |
+| Debug endpoint   | None                             | `GET /graph/structure`                   |
 
 ---
 
@@ -45,51 +45,77 @@ A production-grade **Recursive Language Model (RLM)** system rebuilt on **LangGr
 
 ---
 
-## Architecture
+## Architecture Overview
+
+```mermaid
+graph TB
+    User[User] -->|POST /ingest| Ingest[Ingest Pipeline]
+    User -->|POST /chat| Chat[Chat Router]
+    User -->|POST /chat/stream| Stream[Streaming Pipeline]
+
+    subgraph "Ingest Pipeline"
+        Ingest -->|PDF| Parser[PyMuPDF Parser]
+        Parser -->|Raw Text| Store[Document Store\nRaw Full Text]
+        Parser -->|Raw Text| Chunker[RecursiveCharacterTextSplitter]
+        Chunker -->|Chunks| Hash[SHA256 Hasher]
+        Hash -->|Deduplicated| Embedder[SentenceTransformer]
+        Embedder -->|Vectors| VectorDB[(Qdrant)]
+    end
+
+    subgraph "LangGraph RLM Pipeline"
+        Chat -->|use_rlm=true| Graph[StateGraph]
+        Graph --> AgentNode[agent_node\nLLM decides tool or finish]
+        AgentNode -->|tool_calls?| Edge{should_continue}
+        Edge -->|yes| ToolsNode[tools_node]
+        Edge -->|no| End[END → Final Answer]
+        ToolsNode -->|vector_search| VectorDB
+        ToolsNode -->|grep_context| Store
+        ToolsNode -->|repl_execute| REPL[Sandboxed REPL\ncontext = full doc text]
+        ToolsNode -->|sub_llm_analyze| SubLLM[Sub-LLM\nRecursive Call]
+        ToolsNode -->|divide_and_analyze| DnA[Divide & Analyze\n4 parallel segments]
+        SubLLM -->|depth+1| SubLLM
+        DnA --> SubLLM
+        ToolsNode -->|loop back| AgentNode
+        End --> Memory[MemorySaver Checkpointer\nthread_id = session_id]
+        Memory --> User
+    end
+
+    subgraph "Fallback Pipeline"
+        Chat -->|use_rlm=false| VFallback[Vector Search\n+ LLM Generate]
+        VFallback --> User
+    end
+
+    subgraph "Observability"
+        Chat -.->|Metrics| Metrics[Metrics Collector]
+        Stream -.->|Metrics| Metrics
+        Metrics -->|API| Dashboard["/metrics/summary"]
+    end
+```
+
+### Data Flow
+
+**Ingestion:**
 
 ```
-User Request (FastAPI)
-        │
-        ▼
-pipelines/rlm.py  (thin wrapper)
-        │
-        ▼
-graph/builder.py  ──── assembles ────►  StateGraph
-                                              │
-                              ┌───────────────┘
-                              │
-                    ┌─────────▼──────────┐
-                    │       START        │
-                    └─────────┬──────────┘
-                              │
-                    ┌─────────▼──────────┐
-                    │    agent node      │  ← LLM decides: call tool or finish
-                    │  (graph/nodes.py)  │    same LLM + prompt + tools as before
-                    └─────────┬──────────┘
-                              │
-                    ┌─────────▼──────────┐
-                    │  should_continue   │  ← conditional edge you own
-                    │  (graph/edges.py)  │
-                    └──────┬─────┬───────┘
-                     tools?│     │done?
-                           │     │
-               ┌───────────▼┐    ▼
-               │ tools node │   END
-               │(nodes.py)  │
-               │            │  executes the chosen tool from
-               │vector_search│  services/tools.py (zero changes)
-               │grep_context │
-               │repl_execute │
-               │sub_llm      │
-               │divide_analyze│
-               └──────┬──────┘
-                      │
-                      └──────────► (loops back to agent node)
+PDF → Parse → Chunk → Hash (dedup) → Embed (384-dim) → Qdrant
+                └─→ Raw Full Text → Document Store (for REPL)
+```
 
-Checkpointing (NEW):
-  Every node execution → saved to MemorySaver (upgradeable to SQLite/Postgres)
-  thread_id = session_id → state is isolated and persistent per user session
-  Crash mid-run → graph resumes from the last completed node automatically
+**RLM Query:**
+
+```
+Question → StateGraph Agent Loop:
+  agent_node (LLM)
+  ├─ tool_calls? → tools_node
+  │    ├─ grep_context(keyword)           → line-level matches
+  │    ├─ vector_search(query)            → semantic chunks from Qdrant
+  │    ├─ repl_execute(python_code)       → free-form REPL exploration
+  │    ├─ sub_llm_analyze(instr|||snip)   → focused recursive sub-LLM call
+  │    └─ divide_and_analyze(instr|||doc) → parallel segment analysis
+  │         └─ sub_llm × N segments
+  │    └─ loop back to agent_node
+  └─ no tool_calls? → END
+       └─ Final Answer → Checkpointer (MemorySaver) → Return
 ```
 
 ---
@@ -250,26 +276,29 @@ curl -X POST http://localhost:8000/api/v1/chat \
 ```json
 {
   "answer": "Based on my analysis of the document...",
-  "sources": [],
+  "sources": [
+    { "filename": "document.pdf", "score": 0.847 },
+    { "filename": "document.pdf", "score": 0.733 }
+  ],
   "collection_name": "my_docs",
   "session_id": "a1b2c3d4-...",
   "agent_steps": [
     {
       "step_number": 1,
-      "tool_used": "grep_context",
-      "input_summary": "revenue",
-      "output_summary": "Found 6 matches: Q1 revenue $2.1M...",
-      "recursion_depth": 0
+      "tool_used": "vector_search",
+      "input_summary": "{'query': 'financial figures revenue'}",
+      "output_summary": "[Score: 0.847 | File: document.pdf]\nQ1 revenue...",
+      "recursion_depth": 1
     },
     {
       "step_number": 2,
-      "tool_used": "sub_llm_analyze",
-      "input_summary": "List all financial figures|||Q1 revenue...",
-      "output_summary": "Q1: $2.1M, Q2: $3.4M, Q3: $4.2M...",
-      "recursion_depth": 1
+      "tool_used": "grep_context",
+      "input_summary": "{'pattern': 'revenue'}",
+      "output_summary": "Found 6 matches: Q1 revenue $2.1M...",
+      "recursion_depth": 2
     }
   ],
-  "recursion_depth_reached": 2,
+  "recursion_depth_reached": 4,
   "pipeline_used": "langgraph"
 }
 ```
@@ -296,8 +325,8 @@ curl -X POST http://localhost:8000/api/v1/chat/stream \
 Streams per-node output:
 
 ```
-[TOOL: grep_context] risk
-[TOOL RESULT]: Found 4 matches: "key risks include..."
+[TOOL: vector_search] {'query': 'key risks'}
+[TOOL RESULT]: [Score: 0.821 | File: document.pdf] key risks include...
 [TOOL: sub_llm_analyze] List all risks|||key risks include...
 [TOOL RESULT]: 1. Market risk  2. Operational risk...
 [ANSWER]: The document identifies three key risks...
@@ -343,7 +372,22 @@ curl http://localhost:8000/api/v1/metrics/summary
 curl http://localhost:8000/api/v1/metrics/recent?limit=20
 ```
 
-### 9. Graph Debug (New)
+**Example metrics response:**
+
+```json
+{
+  "total_queries": 150,
+  "successful_queries": 147,
+  "failed_queries": 3,
+  "avg_latency_ms": 28430.2,
+  "avg_vector_searches_per_query": 3.2,
+  "avg_steps_with_results": 3.1,
+  "p95_latency_ms": 72100.5,
+  "p99_latency_ms": 84400.1
+}
+```
+
+### 9. Graph Debug
 
 ```bash
 curl http://localhost:8000/graph/structure
@@ -398,7 +442,7 @@ LANGSMITH_PROJECT=rlm-langgraph
 
 ## RLM Agent Tools
 
-The root LLM chooses from five tools at each reasoning step — identical to rlm-agent:
+The root LLM chooses from five tools at each reasoning step:
 
 ```
 vector_search       → Fast semantic chunk retrieval from Qdrant
@@ -418,7 +462,7 @@ divide_and_analyze  → Split document into N segments, query each in parallel
 | Multi-step reasoning  | `use_rlm: true`  | Agent breaks down the problem      |
 | Very long documents   | `use_rlm: true`  | Divide-and-conquer scales better   |
 | Keyword/number lookup | `use_rlm: true`  | Grep + sub-LLM more precise        |
-| Low latency required  | `use_rlm: false` | ~1–2s vs 5–30s                     |
+| Low latency required  | `use_rlm: false` | ~1–2s vs 15–80s                    |
 | Exploratory analysis  | `use_rlm: true`  | REPL allows open-ended exploration |
 
 ---
@@ -427,13 +471,15 @@ divide_and_analyze  → Split document into N segments, query each in parallel
 
 Tested on modest hardware (4 vCPU, 8GB RAM):
 
-| Operation                    | Latency | Notes                             |
-| ---------------------------- | ------- | --------------------------------- |
-| PDF Ingestion (10 pages)     | ~2–3s   | Chunks + embeds + stores raw text |
-| Vector Fallback Query        | ~1–2s   | Single LLM call                   |
-| RLM Simple Query (2–3 steps) | ~5–10s  | grep + sub-LLM                    |
-| RLM Complex Query (5+ steps) | ~15–30s | divide-and-analyze + recursion    |
-| Max depth query (depth 5)    | ~45–60s | Full recursive chain              |
+| Operation                    | Latency  | Notes                             |
+| ---------------------------- | -------- | --------------------------------- |
+| PDF Ingestion (10 pages)     | ~2–3s    | Chunks + embeds + stores raw text |
+| Vector Fallback Query        | ~1–2s    | Single LLM call                   |
+| RLM Simple Query (2–3 steps) | ~15–30s  | vector_search + grep              |
+| RLM Complex Query (5+ steps) | ~45–80s  | divide-and-analyze + recursion    |
+| Max depth query (depth 5)    | ~90–120s | Full recursive chain              |
+
+> Latency is dominated by the LLM provider. Thinking-mode models like `qwen3-vl-30b-a3b-thinking` reason deeply before each tool call, which increases quality at the cost of speed.
 
 ---
 
@@ -495,7 +541,7 @@ def get_checkpointer():
     return _checkpointer
 ```
 
-Then update `docker-compose.yml` to add a `postgres` service and change `--workers 1` to `--workers 4` in the Dockerfile.
+Then add a `postgres` service in `docker-compose.yml` and change `--workers 1` to `--workers 4` in the Dockerfile.
 
 ### Human-in-the-Loop
 
@@ -504,7 +550,7 @@ Add `interrupt_before` in `graph/builder.py` to pause before any tool execution 
 ```python
 _graph = workflow.compile(
     checkpointer=checkpointer,
-    interrupt_before=["tools"]   # pause before every tool call
+    interrupt_before=["tools"]
 )
 ```
 
@@ -538,12 +584,33 @@ query_latency = Histogram('rlm_query_latency_seconds', 'Query latency')
 - [ ] **SqliteSaver** — Swap MemorySaver for persistence across restarts
 - [ ] **Human-in-the-Loop** — Pause graph at tool node for approval
 - [ ] **Async Sub-LLM Calls** — Parallelize `divide_and_analyze` with `asyncio.gather`
-- [ ] **Source Attribution** — Extract document/page citations from agent steps
 - [ ] **Cost Tracking** — Token counting per query across all recursive LLM calls
 - [ ] **Prometheus Metrics** — Industry-standard observability with Grafana dashboards
 - [ ] **Rate Limiting** — API throttling with SlowAPI
 - [ ] **Authentication** — JWT-based user authentication
 - [ ] **LangGraph Studio** — Visual graph debugging and prototyping
+
+---
+
+## Contributing
+
+Contributions are welcome! This project serves as a boilerplate for building production-grade LangGraph RLM systems.
+
+### How to Contribute
+
+1. **Fork the repository**
+2. **Create a feature branch** — `git checkout -b feature/amazing-feature`
+3. **Commit your changes** — `git commit -m 'Add amazing feature'`
+4. **Push to the branch** — `git push origin feature/amazing-feature`
+5. **Open a Pull Request**
+
+### Contribution Guidelines
+
+- Follow PEP 8 style guide
+- Add tests for new features
+- Update documentation
+- Ensure Docker builds successfully
+- Test with sample PDFs before submitting
 
 ---
 
