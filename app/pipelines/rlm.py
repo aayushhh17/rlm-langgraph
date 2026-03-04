@@ -1,14 +1,5 @@
 """
 RLM pipeline — now a thin wrapper over the LangGraph graph.
-
-The heavy lifting (agent loop, tool execution, memory) is all
-handled by the graph. This file just:
-  1. Prepares the initial state
-  2. Calls graph.invoke() or graph.stream()
-  3. Formats the response to match existing API schemas
-
-Your FastAPI routes (chat.py, stream.py) call this exactly
-as they called the old rlm.py — no route changes needed.
 """
 import logging
 import time
@@ -20,6 +11,40 @@ from core.config import get_settings
 from core.metrics import get_metrics_collector, QueryMetrics
 
 logger = logging.getLogger("rlm_agent")
+
+
+def _extract_sources(agent_steps: list[dict]) -> list[dict]:
+    """
+    Parse vector_search output_summary fields to build a deduplicated
+    sources list with filename + score.
+    """
+    seen = set()
+    sources = []
+    for step in agent_steps:
+        if step.get("tool_used") != "vector_search":
+            continue
+        # output_summary looks like:
+        # "[Score: 0.733 | File: some_file.pdf]\nchunk text..."
+        raw = step.get("output_summary", "")
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line.startswith("[Score:"):
+                continue
+            try:
+                # "[Score: 0.733 | File: Designing Data...]"
+                inner = line.strip("[]")
+                parts = [p.strip() for p in inner.split("|")]
+                score = float(parts[0].replace("Score:", "").strip())
+                filename = parts[1].replace("File:", "").strip()
+                key = (filename, round(score, 3))
+                if key not in seen:
+                    seen.add(key)
+                    sources.append({"filename": filename, "score": score})
+            except Exception:
+                continue
+    # Sort best score first
+    sources.sort(key=lambda x: x["score"], reverse=True)
+    return sources
 
 
 def run_rlm(
@@ -50,7 +75,6 @@ def run_rlm(
         graph = build_graph()
         thread_config = get_thread_config(session_id)
 
-        # Initial state for this run
         initial_state = {
             "messages": [HumanMessage(content=question)],
             "session_id": session_id,
@@ -59,30 +83,39 @@ def run_rlm(
             "recursion_depth": 0,
         }
 
-        # Invoke the graph — checkpointer handles memory automatically
         result = graph.invoke(initial_state, config=thread_config)
 
         # Extract final answer from last AI message
         answer = ""
         for msg in reversed(result["messages"]):
-            if hasattr(msg, "content") and msg.content and not hasattr(msg, "tool_calls"):
+            if hasattr(msg, "tool_calls") and not msg.tool_calls and msg.content:
                 answer = msg.content
                 break
-            # Also handle AIMessage with content but no tool_calls
-            if hasattr(msg, "tool_calls") and not msg.tool_calls and msg.content:
+            if hasattr(msg, "content") and msg.content and not hasattr(msg, "tool_calls"):
                 answer = msg.content
                 break
 
         agent_steps = result.get("agent_steps", [])
+        sources = _extract_sources(agent_steps)
+
+        # Metrics
+        vector_steps = [s for s in agent_steps if s.get("tool_used") == "vector_search"]
+        steps_with_results = [
+            s for s in agent_steps
+            if s.get("output_summary", "").strip()
+            and not s.get("output_summary", "").startswith("[")
+            and s.get("output_summary") != "pending..."
+        ]
 
         metrics.total_latency_ms = (time.time() - start_time) * 1000
-        metrics.num_docs_retrieved = len(agent_steps)
+        metrics.num_docs_retrieved = len(vector_steps)
+        metrics.num_docs_after_rerank = len(steps_with_results)
         metrics.success = True
         metrics_collector.record_query(metrics)
 
         return {
             "answer": answer or "No answer generated.",
-            "sources": [],
+            "sources": sources,
             "collection_name": col,
             "session_id": session_id,
             "agent_steps": agent_steps,
@@ -106,8 +139,6 @@ def run_rlm_streaming(
 ):
     """
     Streaming version — yields agent step events then final answer.
-    Used by the /chat/stream endpoint.
-    LangGraph's .stream() gives us much richer streaming than before.
     """
     settings = get_settings()
     col = collection_name or settings.qdrant_collection
@@ -126,17 +157,13 @@ def run_rlm_streaming(
         "recursion_depth": 0,
     }
 
-    # stream_mode="updates" yields the state delta after each node
     for event in graph.stream(initial_state, config=thread_config, stream_mode="updates"):
         for node_name, node_output in event.items():
             if node_name == "tools":
-                # Tool was executed — show what ran
                 messages = node_output.get("messages", [])
                 for msg in messages:
                     yield f"[TOOL RESULT]: {str(msg.content)[:200]}\n"
-
             elif node_name == "agent":
-                # Agent step — show tool calls or final answer
                 messages = node_output.get("messages", [])
                 for msg in messages:
                     if hasattr(msg, "tool_calls") and msg.tool_calls:
